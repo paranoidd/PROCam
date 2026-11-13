@@ -2595,6 +2595,9 @@ RgbImage finish(const Planes &merged, const FinishOptions &options, FinishStats 
     // The black and white points move the smooth layer only and the fine
     // detail is added back unchanged: stretching the bright tones would
     // otherwise amplify their noise too (indoor walls: half again grainier).
+    // The display colour is worked out once: this pass keeps it in place of
+    // the linear colour (and its luma in place of the fused one, both done
+    // with) for the pass below.
     std::vector<float> curvedLuma, smoothLuma;
     if (toneEnds.blackPoint > 0 || toneEnds.whiteScale > 1) {
         curvedLuma.resize(pixels);
@@ -2602,7 +2605,10 @@ RgbImage finish(const Planes &merged, const FinishOptions &options, FinishStats 
             for (int x = 0; x < width; ++x) {
                 const std::size_t i = std::size_t(y) * width + x;
                 float g[3];
-                curvedLuma[i] = contrastCurve(display(i, g));
+                const float l = display(i, g);
+                curvedLuma[i] = contrastCurve(l);
+                for (int k = 0; k < 3; ++k) rgb[i * 3 + k] = g[k];
+                fused[i] = l;
             }
         });
         smoothLuma = gaussianBlur(curvedLuma, width, height, 2.0);
@@ -2624,9 +2630,15 @@ RgbImage finish(const Planes &merged, const FinishOptions &options, FinishStats 
         for (int x = 0; x < width; ++x) {
             const std::size_t i = std::size_t(y) * width + x;
             float *p = &rgb[i * 3];
-            float g[3];
-            const float l = display(i, g);
-            const float curved = contrastCurve(l);
+            float g[3], l, curved;
+            if (smoothLuma.empty()) {
+                l = display(i, g);
+                curved = contrastCurve(l);
+            } else {
+                for (int k = 0; k < 3; ++k) g[k] = p[k];
+                l = fused[i];
+                curved = curvedLuma[i];
+            }
             const float lc = smoothLuma.empty() ? toneEnds(curved)
                                                 : toneEnds(smoothLuma[i]) + (curved - smoothLuma[i]);
             // Darkened shadows keep their colour in proportion.
