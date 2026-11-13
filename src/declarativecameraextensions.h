@@ -41,6 +41,9 @@ class DeclarativeCameraExtensions : public QObject
     Q_PROPERTY(bool keepBurstFrames MEMBER m_keepBurstFrames NOTIFY keepBurstFramesChanged)
     // Learned GPU denoise for noisy RAW merges (RawPipeline::RenderSettings).
     Q_PROPERTY(bool learnedDenoise MEMBER m_learnedDenoise NOTIFY learnedDenoiseChanged)
+    // Shadow lift of RAW bursts in contrasty scenes: 0 natural, 1 balanced,
+    // 2 bright (RawPipeline::RenderSettings).
+    Q_PROPERTY(int shadowLift MEMBER m_shadowLift NOTIFY shadowLiftChanged)
     // A camera whose RAW frames came out damaged keeps taking RAW photos (at
     // the retry frame rate) instead of switching to YUV frames: for testers.
     // One value for the whole app, whichever instance sets it.
@@ -217,6 +220,7 @@ signals:
     void pendingRendersChanged();
     void keepBurstFramesChanged();
     void learnedDenoiseChanged();
+    void shadowLiftChanged();
     void keepTryingRawChanged();
 
 public:
@@ -297,6 +301,7 @@ private:
     bool m_bracketBurst = false;
     bool m_keepBurstFrames = false;
     bool m_learnedDenoise = false;
+    int m_shadowLift = 0;
     qreal m_bracketEv = 0.0;
     QString m_bracketBaseShutterNs;
     QString m_bracketCombineTargetPath;

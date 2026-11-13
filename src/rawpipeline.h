@@ -38,6 +38,9 @@ struct RenderSettings {
     // Tone refinements: black point, white point, clarity and 5% more
     // saturation (FinishOptions / YuvOptions).
     bool toneRefinements = true;
+    // Shadow lift in contrasty scenes, RAW bursts only: 0 natural, 1
+    // balanced, 2 bright (FinishOptions::ShadowLift).
+    int shadowLift = 0;
 };
 
 // Every RAW frame of a render was only partly written by the HAL

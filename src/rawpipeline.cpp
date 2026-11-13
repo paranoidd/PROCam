@@ -675,6 +675,7 @@ bool renderFullFrame(const QStringList &metadataPaths, const RenderSettings &set
         const double exposure = settings.exposure > 0 && std::isfinite(settings.exposure) ? settings.exposure : 1.0;
         options.targetGain = std::max(0.05, settings.targetGain) * exposure;
         options.night = m.value(QStringLiteral("night_mode")).toBool();
+        options.shadowLift = std::max(0, std::min(2, settings.shadowLift));
         options.faces = facesFrom(m);
         if (settings.toneRefinements) {
             options.blackPoint = true;
@@ -719,6 +720,7 @@ bool renderFullFrame(const QStringList &metadataPaths, const RenderSettings &set
             p.insert(QStringLiteral("merge_rejection"), mergeStats.rejection);
             p.insert(QStringLiteral("relative_noise"), options.relativeNoise);
             p.insert(QStringLiteral("denoise_severity"), severity);
+            p.insert(QStringLiteral("shadow_lift"), options.shadowLift);
             if (!learnedInfo.isEmpty()) p.insert(QStringLiteral("learned_denoise"), learnedInfo);
             p.insert(QStringLiteral("super_resolution"), detail.empty() ? 0.0 : detailStrength);
             if (zoom.active()) {

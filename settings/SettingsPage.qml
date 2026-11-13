@@ -168,6 +168,33 @@ ApplicationSettings {
         onClicked: Settings.global.advancedMode = !Settings.global.advancedMode
     }
 
+    ComboBox {
+        label: "Shadows in HDR photos"
+        description: (Settings.global.shadowLift === 0
+                      ? "Dark areas under a bright sky stay dark, close to what you saw."
+                      : Settings.global.shadowLift === 1
+                        ? "Dark areas under a bright sky are brightened; the sky keeps its detail."
+                        : "Dark areas are brightened further, as most phones do.")
+                     + " Applies to cameras that take RAW bursts (the main camera)."
+        enabled: AccessPolicy.cameraEnabled
+        currentIndex: Math.max(0, Math.min(2, Settings.global.shadowLift))
+
+        menu: ContextMenu {
+            MenuItem {
+                text: "Natural"
+                onClicked: Settings.global.shadowLift = 0
+            }
+            MenuItem {
+                text: "Balanced"
+                onClicked: Settings.global.shadowLift = 1
+            }
+            MenuItem {
+                text: "Bright"
+                onClicked: Settings.global.shadowLift = 2
+            }
+        }
+    }
+
     SectionHeader {
         text: "ProCam compatibility"
         visible: Settings.global.advancedMode

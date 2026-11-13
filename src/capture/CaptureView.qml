@@ -1970,6 +1970,7 @@ FocusScope {
 
         keepBurstFrames: Settings.global.keepBurstFrames
         learnedDenoise: Settings.global.learnedDenoise
+        shadowLift: Settings.global.shadowLift
         // Selfies saved as the mirrored viewfinder shows them.
         captureMirror: Settings.global.mirrorSelfies && captureView.camera2Viewfinder !== null
                        && captureView.camera2Viewfinder.selfieCamera

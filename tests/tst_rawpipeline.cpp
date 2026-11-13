@@ -794,8 +794,8 @@ private slots:
         // RAWPIPELINE_RENDER=<sidecar.json>[,<sidecar.json>...] (a burst,
         // reference first) [RAWPIPELINE_OUT=<file.jpg>]
         // [RAWPIPELINE_CALIBRATION=<dir> RAWPIPELINE_MODEL=<model>]
-        // [RAWPIPELINE_NO_SR=1]: render a device capture on the host (not
-        // run by default).
+        // [RAWPIPELINE_NO_SR=1] [RAWPIPELINE_SHADOWS=0|1|2]: render a device
+        // capture on the host (not run by default).
         const QString metadata = qEnvironmentVariable("RAWPIPELINE_RENDER");
         if (metadata.isEmpty()) QSKIP("set RAWPIPELINE_RENDER=<sidecar.json> to run");
         RenderSettings settings;
@@ -814,6 +814,7 @@ private slots:
             settings.superResolution = false;
         if (qEnvironmentVariableIsSet("RAWPIPELINE_NO_TONE"))
             settings.toneRefinements = false;
+        settings.shadowLift = qEnvironmentVariableIntValue("RAWPIPELINE_SHADOWS");
         QImage image;
         QJsonObject info;
         QString error;
@@ -1111,6 +1112,76 @@ private slots:
         qInfo("far wall: single %.1f, burst %.1f; burst wall next to the window %.1f", singleFar, burstFar, burstNear);
         QVERIFY2(burstFar > 0.85 * singleFar, "burst darker than a single frame");
         QVERIFY2(burstNear > 0.8 * burstFar, "dark halo next to the window");
+    }
+
+    void shadowLiftKeepsSky()
+    {
+        // A bright sky with a grey cloud bank over a street in deep shade
+        // (device captures 2026-11-13). FinishOptions::shadowLift brightens
+        // the street. In a single fusion that far apart the cloud bank falls
+        // to the short exposure and comes out darker than without the lift
+        // (a dark smear over the roofs), which is why the lifted modes fuse
+        // in two steps.
+        const int w = 768, h = 576, cloudTop = 130, horizon = 200;
+        Scene scene;
+        scene.width = w;
+        scene.height = h;
+        scene.rgb.resize(std::size_t(w) * h * 3);
+        for (int y = 0; y < h; ++y)
+            for (int x = 0; x < w; ++x) {
+                float *p = &scene.rgb[(std::size_t(y) * w + x) * 3];
+                const float street = 0.008f + 0.003f * std::sin(x * 0.2f) * std::sin(y * 0.2f);
+                for (int c = 0; c < 3; ++c) p[c] = y < cloudTop ? 3.0f : y < horizon ? 0.5f : street;
+            }
+        auto mean = [&](const std::vector<uint8_t> &rgb, int y0, int y1) {
+            double sum = 0;
+            for (int y = y0; y < y1; ++y)
+                for (int x = 100; x < w - 100; ++x)
+                    for (int c = 0; c < 3; ++c) sum += rgb[(std::size_t(y) * w + x) * 3 + c];
+            return sum / (3.0 * (y1 - y0) * (w - 200));
+        };
+        const Planes frame = toPlanes(mosaicFrame(scene, 3, 0, 0, 1.0 / 3.25, 1e-5, 1e-7, 11), 1.0);
+        double street[3], cloud[3], sky[3], shortGain[3], longGain[3];
+        for (int mode = 0; mode < 3; ++mode) {
+            FinishOptions options = finishOptions(3);
+            options.targetGain = 3.25;
+            options.relativeNoise = 0.02;
+            options.shadowLift = mode;
+            FinishStats stats;
+            const RgbImage image = finish(frame, options, &stats);
+            street[mode] = mean(image.rgb, horizon + 60, h - 20);
+            cloud[mode] = mean(image.rgb, cloudTop + 15, horizon - 15);
+            sky[mode] = mean(image.rgb, 10, cloudTop - 30);
+            shortGain[mode] = stats.shortGain;
+            longGain[mode] = stats.longGain;
+            qInfo("shadow lift %d: short %.2f long %.2f; street %.1f, cloud %.1f, sky %.1f",
+                  mode, stats.shortGain, stats.longGain, street[mode], cloud[mode], sky[mode]);
+        }
+        // The lifted gains in a single fusion and in two, on the luma alone.
+        std::vector<float> luma(std::size_t(w) * h);
+        for (int y = 0; y < h; ++y)
+            for (int x = 0; x < w; ++x) luma[std::size_t(y) * w + x] = scene.rgb[(std::size_t(y) * w + x) * 3] / 3.25f;
+        auto lumaMean = [&](const std::vector<float> &v, int y0, int y1) {
+            double sum = 0;
+            for (int y = y0; y < y1; ++y)
+                for (int x = 100; x < w - 100; ++x) sum += v[std::size_t(y) * w + x];
+            return sum / ((y1 - y0) * (w - 200));
+        };
+        const std::vector<float> natural = fuseExposures(luma, w, h, shortGain[0], longGain[0], 1);
+        const std::vector<float> one = fuseExposures(luma, w, h, shortGain[1], longGain[1], 1);
+        const std::vector<float> two = fuseExposures(luma, w, h, shortGain[1], longGain[1], 2);
+        const double cloudNatural = lumaMean(natural, cloudTop + 15, horizon - 15);
+        const double cloudOne = lumaMean(one, cloudTop + 15, horizon - 15), cloudTwo = lumaMean(two, cloudTop + 15, horizon - 15);
+        qInfo("cloud (gamma): natural %.3f; lifted in one fusion %.3f, in two %.3f", cloudNatural, cloudOne, cloudTwo);
+        QVERIFY2(street[1] > 1.4 * street[0], "balanced does not brighten the street");
+        QVERIFY2(street[2] > 1.1 * street[1], "bright does not brighten the street further");
+        for (int mode = 1; mode < 3; ++mode) {
+            QVERIFY2(cloud[mode] >= cloud[0], "the lift darkens the cloud bank");
+            QVERIFY2(sky[mode] > 235, "the lift darkens the sky");
+        }
+        // The scene must show the problem, or the checks above prove nothing.
+        QVERIFY2(cloudOne < 0.9 * cloudNatural, "a single fusion no longer darkens the cloud in this scene");
+        QVERIFY2(cloudTwo >= cloudNatural, "two fusions darken the cloud bank");
     }
 
     void spatialDenoiseSingleFrame()

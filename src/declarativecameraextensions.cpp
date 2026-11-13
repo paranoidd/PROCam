@@ -2803,6 +2803,7 @@ bool DeclarativeCameraExtensions::startRawImageRender()
 {
     RawPipeline::RenderSettings settings = rawPipelineSettings();
     settings.learnedDenoise = m_learnedDenoise;
+    settings.shadowLift = m_shadowLift;
     m_rawRenderStart = m_rawCaptureTimer.elapsed();
     m_rawRenderWatcher.reset(new QFutureWatcher<bool>);
     connect(m_rawRenderWatcher.data(), &QFutureWatcher<bool>::finished,
@@ -2886,6 +2887,7 @@ bool DeclarativeCameraExtensions::combineRawBurst(
     job.quality = qBound(1, jpegQuality, 100);
     job.settings = rawPipelineSettings();
     job.settings.learnedDenoise = m_learnedDenoise;
+    job.settings.shadowLift = m_shadowLift;
     job.settings.targetGain = std::isfinite(targetGain) && targetGain > 0 ? targetGain : 1.0;
     job.directory = QSharedPointer<QTemporaryDir>(m_rawBracketDirectory.take());
     job.queued.start();

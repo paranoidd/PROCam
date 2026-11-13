@@ -157,6 +157,9 @@ SettingsBase {
         property bool keepTryingRaw: false
         // Learned GPU denoise for noisy HDR and night photos (experimental).
         property bool learnedDenoise: false
+        // Shadows in contrasty HDR photos: 0 natural, 1 balanced, 2 bright
+        // (CameraExtensions.shadowLift).
+        property int shadowLift: 0
         property bool estimatedExposureMetering: false
         property bool showExposureStatus: false
         property bool focusPeaking: false

@@ -1399,19 +1399,17 @@ struct FusionWeights {
 };
 
 // Mertens exposure fusion of two exposures of the same image, both derived
-// from `luma` by exposure(value). The full-resolution level is evaluated on
-// the fly to save memory.
+// from `luma` by exposure(pixel index). The full-resolution level is
+// evaluated on the fly to save memory.
 template <typename ExposureOf>
 std::vector<float> fuse(const std::vector<float> &luma, int width, int height, const ExposureOf &exposure)
 {
-    auto lumaAt = [&](int x, int y) { return luma[std::size_t(y) * width + x]; };
-
     int levels = 1;
     while ((width >> levels) >= 16 && (height >> levels) >= 16 && levels < 10) ++levels;
     if (levels < 2) {
         std::vector<float> fused(luma.size());
         for (std::size_t i = 0; i < luma.size(); ++i) {
-            const Exposure e = exposure(luma[i]);
+            const Exposure e = exposure(i);
             fused[i] = e.l + e.w * (e.s - e.l);
         }
         return fused;
@@ -1427,7 +1425,7 @@ std::vector<float> fuse(const std::vector<float> &luma, int width, int height, c
         std::vector<float> rowS(std::size_t(outWidth) * height), rowL(rowS.size()), rowW(rowS.size());
         parallelFor(0, height, [&](int y) {
             std::vector<Exposure> line(width);
-            for (int x = 0; x < width; ++x) line[x] = exposure(lumaAt(x, y));
+            for (int x = 0; x < width; ++x) line[x] = exposure(std::size_t(y) * width + x);
             for (int ox = 0; ox < outWidth; ++ox) {
                 float vs = 0, vl = 0, vw = 0;
                 for (int i = 0; i < 5; ++i) {
@@ -1494,7 +1492,7 @@ std::vector<float> fuse(const std::vector<float> &luma, int width, int height, c
     parallelFor(0, height, [&](int y) {
         for (int x = 0; x < width; ++x) {
             const std::size_t i = std::size_t(y) * width + x;
-            const Exposure e = exposure(luma[i]);
+            const Exposure e = exposure(i);
             const float detailS = e.s - expandAt(gS[1], x, y);
             const float detailL = e.l - expandAt(gL[1], x, y);
             fused[i] = std::max(0.0f, std::min(1.0f, expandAt(result, x, y) + detailL + e.w * (detailS - detailL)));
@@ -1506,14 +1504,25 @@ std::vector<float> fuse(const std::vector<float> &luma, int width, int height, c
 } // namespace
 
 std::vector<float> fuseExposures(const std::vector<float> &luma, int width, int height,
-                                 double shortGain, double longGain)
+                                 double shortGain, double longGain, int steps)
 {
     // Two synthetic exposures of the same linear luma: the short one keeps
     // highlights, the long one lifts shadows.
     const Curve &c = curve();
     const float gs = float(shortGain), gl = float(longGain);
     const FusionWeights weights;
-    return fuse(luma, width, height, [&](float y) { return weights(c.toGamma(y * gs), c.toGamma(y * gl)); });
+    if (steps >= 2 && longGain > shortGain) {
+        // The first fusion's result stands in for the short exposure of the
+        // second: it is already gamma-encoded and holds the highlights.
+        const float gm = float(std::sqrt(shortGain * longGain));
+        const std::vector<float> first = fuse(luma, width, height, [&](std::size_t i) {
+            return weights(c.toGamma(luma[i] * gs), c.toGamma(luma[i] * gm));
+        });
+        return fuse(luma, width, height, [&](std::size_t i) { return weights(first[i], c.toGamma(luma[i] * gl)); });
+    }
+    return fuse(luma, width, height, [&](std::size_t i) {
+        return weights(c.toGamma(luma[i] * gs), c.toGamma(luma[i] * gl));
+    });
 }
 
 std::vector<float> fuseCameraExposures(const std::vector<float> &luma, int width, int height,
@@ -1523,8 +1532,8 @@ std::vector<float> fuseCameraExposures(const std::vector<float> &luma, int width
     // is what the camera itself makes of it at the metered exposure.
     const FusionWeights weights;
     const int last = int(longCurve.size()) - 1;
-    return fuse(luma, width, height, [&](float y) {
-        const float clamped = std::max(0.0f, std::min(1.0f, y));
+    return fuse(luma, width, height, [&](std::size_t i) {
+        const float clamped = std::max(0.0f, std::min(1.0f, luma[i]));
         const float position = clamped * last;
         const int index = std::min(last - 1, int(position));
         const float fraction = position - index;
@@ -2467,19 +2476,26 @@ RgbImage finish(const Planes &merged, const FinishOptions &options, FinishStats 
     // scene come out equally bright.
     // Night mode lifts further but aims lower, so a night still looks like
     // night (dusk), not day.
+    // FinishOptions::shadowLift: Balanced and Bright keep the whole lift in
+    // contrasty scenes, Bright lifts dark scenes further.
+    const bool liftShadows = !options.night && options.shadowLift != FinishOptions::NaturalShadows;
+    const double dayLift = options.shadowLift == FinishOptions::BrightShadows ? 4.5 : 3.0;
     const double keyLift = options.night ? std::max(1.25, std::min(8.0, 0.15 / std::max(key, 1e-6)))
-                                         : std::max(1.25, std::min(3.0, 0.22 / std::max(key, 1e-6)));
-    const double lift = std::max(1.0, keyLift * std::max(0.5, std::min(1.0, shortGain / targetGain)));
+                                         : std::max(1.25, std::min(dayLift, 0.22 / std::max(key, 1e-6)));
+    const double lift = std::max(1.0, keyLift * std::max(liftShadows ? 1.0 : 0.5, std::min(1.0, shortGain / targetGain)));
     double longGain = shortGain;
+    int fusionSteps = 1;
     if (options.localToneMapping > 0) {
         // At most 2 EV between the two exposures: beyond that the fusion
         // darkens a wide halo around bright areas. Highlights that would
-        // need more are compressed only that far.
-        const double maxRatio = 4.0;
+        // need more are compressed only that far. With the shadows lifted,
+        // 4 EV in two fusions of at most 2 EV each (fuseExposures()).
+        const double maxRatio = liftShadows ? 16.0 : 4.0;
         const double wanted = targetGain * lift;
         shortGain = std::max(shortGain, wanted / maxRatio);
         const double ratio = std::max(1.5, wanted / shortGain);
         longGain = shortGain * std::pow(ratio, std::min(1.0, options.localToneMapping));
+        if (liftShadows && longGain > 4.0 * shortGain) fusionSteps = 2;
     }
     // Faces: mid-tones follow the long exposure, so a face lands near
     // faceLevel * longGain. Keep it within FaceLow..FaceHigh: a face in hard
@@ -2507,7 +2523,7 @@ RgbImage finish(const Planes &merged, const FinishOptions &options, FinishStats 
     }
     std::vector<float> fused;
     if (options.localToneMapping > 0) {
-        fused = fuseExposures(luma, width, height, shortGain, longGain);
+        fused = fuseExposures(luma, width, height, shortGain, longGain, fusionSteps);
         if (stats && faceLevel > 1e-5) {
             double b = -1;
             largestFaceLevel(fused, width, height, options.faces, originX, originY, pixelStep, sensorWidth,

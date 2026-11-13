@@ -198,6 +198,15 @@ struct FinishOptions {
     // colour is faded out in shadows within a few times this level.
     double blackNoise = 0.0;
     double localToneMapping = 1.0; // 0 disables exposure fusion
+    // How far shadows are lifted when the highlights had to be compressed
+    // (a bright sky over a shaded street). Natural keeps them dark: the lift
+    // from the scene key is halved and the two exposures stay within 2 EV.
+    // Balanced applies the whole lift, up to 4 EV between the exposures,
+    // fused in two steps so the sky around dark objects does not darken.
+    // Bright also raises the lift for dark scenes from 3x to 4.5x the
+    // metered exposure. Night mode has its own lift and ignores this.
+    enum ShadowLift { NaturalShadows = 0, BalancedShadows = 1, BrightShadows = 2 };
+    int shadowLift = NaturalShadows;
     // Night mode: dark scenes are lifted up to 8x the metered exposure (3x
     // otherwise), towards a dusk-like key rather than daylight.
     bool night = false;
@@ -343,8 +352,12 @@ BurstPlan planBurst(int64_t meteredExposureNs, int meteredIso, double clippedFra
 // Exposed for tests.
 void fft16x16(float *re, float *im, bool inverse);
 std::vector<float> demosaic(const std::vector<float> &mosaic, int width, int height, int cfa);
+// steps = 2 fuses the short exposure with one halfway (in EV) to the long
+// one, then the result with the long one: the dark halo a single fusion
+// leaves around bright areas grows with the distance between its two
+// exposures, so two short steps reach further than one long step.
 std::vector<float> fuseExposures(const std::vector<float> &luma, int width, int height,
-                                 double shortGain, double longGain);
+                                 double shortGain, double longGain, int steps = 1);
 // The same for an image a camera has already tone mapped (gamma-encoded
 // luma): the long exposure is longCurve (luma at the captured exposure ->
 // the camera's luma at the metered one, sampled evenly over [0, 1]).
