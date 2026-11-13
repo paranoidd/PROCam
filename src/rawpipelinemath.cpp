@@ -1547,11 +1547,23 @@ std::vector<float> gaussianBlur(const std::vector<float> &source, int width, int
     parallelFor(0, height, [&](int y) {
         const float *row = &source[std::size_t(y) * width];
         float *dst = &temp[std::size_t(y) * width];
-        for (int x = 0; x < width; ++x) {
+        auto reflected = [&](int x) {
             float v = 0;
             for (int i = -radius; i <= radius; ++i) v += kernel[i + radius] * row[reflect(x + i, width)];
             dst[x] = v;
+        };
+        // Away from the borders no tap is reflected: add the taps one at a
+        // time over the whole row, in the same order as the sum above (the
+        // result is the same), in loops the compiler can vectorize.
+        const int first = std::min(radius, width), last = std::max(first, width - radius);
+        for (int x = 0; x < first; ++x) reflected(x);
+        for (int x = first; x < last; ++x) dst[x] = 0;
+        for (int i = -radius; i <= radius; ++i) {
+            const float k = kernel[i + radius];
+            const float *tap = row + i;
+            for (int x = first; x < last; ++x) dst[x] += k * tap[x];
         }
+        for (int x = last; x < width; ++x) reflected(x);
     });
     parallelFor(0, height, [&](int y) {
         float *dst = &out[std::size_t(y) * width];
