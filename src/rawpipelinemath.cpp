@@ -705,10 +705,18 @@ void loadMosaicTiles(const BayerFrame &frame, const float *black, const float *s
             float *even = tiles[2 * half] + y * MergeTileSize, *odd = tiles[2 * half + 1] + y * MergeTileSize;
             const float blackEven = black[2 * half], blackOdd = black[2 * half + 1];
             const float scaleEven = scale[2 * half], scaleOdd = scale[2 * half + 1];
-            for (int x = 0; x < MergeTileSize; ++x) {
-                const int px = insideX ? originX + x : reflect(originX + x, width);
-                even[x] = (float(row[2 * px]) - blackEven) * scaleEven;
-                odd[x] = (float(row[2 * px + 1]) - blackOdd) * scaleOdd;
+            if (insideX) {
+                const uint16_t *pair = row + 2 * originX;
+                for (int x = 0; x < MergeTileSize; ++x) {
+                    even[x] = (float(pair[2 * x]) - blackEven) * scaleEven;
+                    odd[x] = (float(pair[2 * x + 1]) - blackOdd) * scaleOdd;
+                }
+            } else {
+                for (int x = 0; x < MergeTileSize; ++x) {
+                    const int px = reflect(originX + x, width);
+                    even[x] = (float(row[2 * px]) - blackEven) * scaleEven;
+                    odd[x] = (float(row[2 * px + 1]) - blackOdd) * scaleOdd;
+                }
             }
         }
     }
@@ -818,15 +826,20 @@ Planes mergeFrames(int width, int height, float clip, int frameCount, Load load,
                     forwardPair(tile[2], tile[3], ar[2], ai[2], ar[3], ai[3]);
                     for (int p = 0; p < 4; ++p) {
                         const float threshold = temporal * sigma2[p];
-                        double weightSum = 0;
+                        // The weights are summed in a loop of their own (in
+                        // the same order): a running sum in the loop above
+                        // it would keep the compiler from vectorizing it.
+                        float weight[256];
                         for (int i = 0; i < 256; ++i) {
                             const float dr = rr[p][i] - ar[p][i], di = ri[p][i] - ai[p][i];
                             const float d2 = dr * dr + di * di;
                             const float a = d2 / (d2 + threshold + 1e-30f);
                             mr[p][i] += ar[p][i] + a * dr;
                             mi[p][i] += ai[p][i] + a * di;
-                            weightSum += a;
+                            weight[i] = a;
                         }
+                        double weightSum = 0;
+                        for (int i = 0; i < 256; ++i) weightSum += weight[i];
                         rejection += weightSum / 256;
                     }
                 }
@@ -834,38 +847,48 @@ Planes mergeFrames(int width, int height, float clip, int frameCount, Load load,
                 for (int p = 0; p < 4; ++p) {
                     const float merged2 = sigma2[p] / frameCount;
                     for (int i = 0; i < 256; ++i) {
-                        float re = mr[p][i] * inverseCount, im = mi[p][i] * inverseCount;
-                        if (spatial > 0 && i) {
+                        mr[p][i] *= inverseCount;
+                        mi[p][i] *= inverseCount;
+                    }
+                    if (!(spatial > 0)) continue;
+                    // Every coefficient but DC (i = 0); with or without the
+                    // pilot estimate is decided once, not per coefficient.
+                    if (pilot > 0) {
+                        for (int i = 1; i < 256; ++i) {
+                            const float re = mr[p][i], im = mi[p][i];
                             const float m2 = re * re + im * im;
                             const float shaping = floor + (1.0f - floor) * tables.radius[i];
                             const float noise = spatial * shaping * merged2;
-                            float power = m2;
-                            if (pilot > 0) {
-                                const float first = m2 / (m2 + pilot * shaping * merged2 + 1e-30f);
-                                power = m2 * first * first;
-                            }
+                            const float first = m2 / (m2 + pilot * shaping * merged2 + 1e-30f);
+                            const float power = m2 * first * first;
                             const float shrink = power / (power + noise + 1e-30f);
-                            re *= shrink;
-                            im *= shrink;
+                            mr[p][i] = re * shrink;
+                            mi[p][i] = im * shrink;
                         }
-                        mr[p][i] = re;
-                        mi[p][i] = im;
+                    } else {
+                        for (int i = 1; i < 256; ++i) {
+                            const float re = mr[p][i], im = mi[p][i];
+                            const float m2 = re * re + im * im;
+                            const float shaping = floor + (1.0f - floor) * tables.radius[i];
+                            const float noise = spatial * shaping * merged2;
+                            const float shrink = m2 / (m2 + noise + 1e-30f);
+                            mr[p][i] = re * shrink;
+                            mi[p][i] = im * shrink;
+                        }
                     }
                 }
                 inversePair(mr[0], mi[0], mr[1], mi[1], tile[0], tile[1]);
                 inversePair(mr[2], mi[2], mr[3], mi[3], tile[2], tile[3]);
+                const int x0 = std::max(0, -ox), x1 = std::min(MergeTileSize, width - ox);
                 for (int p = 0; p < 4; ++p) {
                     std::vector<float> &plane = out.phase[p];
                     for (int y = 0; y < MergeTileSize; ++y) {
                         const int py = oy + y;
                         if (py < 0 || py >= height) continue;
                         const float wy = tables.window[y] / 256.0f;
-                        float *row = &plane[std::size_t(py) * width];
-                        for (int x = 0; x < MergeTileSize; ++x) {
-                            const int px = ox + x;
-                            if (px < 0 || px >= width) continue;
-                            row[px] += tile[p][y * 16 + x] * wy * tables.window[x];
-                        }
+                        float *row = &plane[std::size_t(py) * width + (ox + x0)];
+                        const float *values = tile[p] + y * 16 + x0, *window = tables.window + x0;
+                        for (int x = 0; x < x1 - x0; ++x) row[x] += values[x] * wy * window[x];
                     }
                 }
             }
