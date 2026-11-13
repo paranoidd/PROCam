@@ -2347,13 +2347,33 @@ RgbImage finish(const Planes &merged, const FinishOptions &options, FinishStats 
         };
         float coring[bands];
         {
-            std::vector<std::vector<float>> samples(bands);
-            for (int y = 0; y < height; y += 3)
-                for (int x = (y / 3) % 3; x < width; x += 3) {
-                    const std::size_t i = std::size_t(y) * width + x;
-                    const float d = (detail[i] - detailLow[i]) - (demosaicked[i] - demosaickedLow[i]);
-                    samples[bandOf(demosaickedLow[i])].push_back(std::abs(d));
+            // Every third pixel of every third row, gathered in blocks of
+            // rows on all cores and joined in order: the same lists as a
+            // single pass.
+            const int sampleRows = (height + 2) / 3, blockRows = 32;
+            const int blocks = (sampleRows + blockRows - 1) / blockRows;
+            std::vector<std::vector<std::vector<float>>> blockSamples(blocks);
+            parallelFor(0, blocks, [&](int block) {
+                std::vector<std::vector<float>> &local = blockSamples[block];
+                local.resize(bands);
+                const int last = std::min(sampleRows, (block + 1) * blockRows);
+                for (int row = block * blockRows; row < last; ++row) {
+                    const int y = row * 3;
+                    for (int x = (y / 3) % 3; x < width; x += 3) {
+                        const std::size_t i = std::size_t(y) * width + x;
+                        const float d = (detail[i] - detailLow[i]) - (demosaicked[i] - demosaickedLow[i]);
+                        local[bandOf(demosaickedLow[i])].push_back(std::abs(d));
+                    }
                 }
+            });
+            std::vector<std::vector<float>> samples(bands);
+            for (int b = 0; b < bands; ++b) {
+                std::size_t total = 0;
+                for (const std::vector<std::vector<float>> &local : blockSamples) total += local[b].size();
+                samples[b].reserve(total);
+                for (const std::vector<std::vector<float>> &local : blockSamples)
+                    samples[b].insert(samples[b].end(), local[b].begin(), local[b].end());
+            }
             float previous = 0;
             for (int b = 0; b < bands; ++b) {
                 std::vector<float> &v = samples[b];
