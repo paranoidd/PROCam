@@ -31,6 +31,10 @@ SettingsMenu {
             color: Theme.lightPrimaryColor
             font.pixelSize: Theme.fontSizeExtraSmall
             font.bold: true
+            // A label a little too wide ("Balanced") shrinks to fit instead
+            // of fading out at both ends.
+            fontSizeMode: Text.HorizontalFit
+            minimumPixelSize: Math.round(Theme.fontSizeExtraSmall * 0.7)
             text: menu.valueLabel ? menu.valueLabel(modelData) : modelData
         }
     }
