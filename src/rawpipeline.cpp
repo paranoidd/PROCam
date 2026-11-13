@@ -8,6 +8,7 @@
 #include "mldenoise.h"
 #include "imageadjustments.h"
 
+#include <exception>
 #include <QDebug>
 #include <QDir>
 #include <QElapsedTimer>
@@ -445,11 +446,34 @@ bool renderFullFrame(const QStringList &metadataPaths, const RenderSettings &set
         // left, the camera's RAW output is unusable and the caller is told.
         int damagedFrames = 0;
         QString damage;
-        for (const QString &path : metadataPaths) {
-            frames.emplace_back(new BayerFrame);
-            const QJsonObject m = loadFrame(path, frames.back().get());
+        // The files are read and checked on all cores; what the loop below
+        // does with each frame, in order, is as when it read them itself: an
+        // unreadable frame still ends the render when its turn comes.
+        struct Loaded {
+            std::unique_ptr<BayerFrame> frame;
+            QJsonObject metadata;
+            QString damage;
+            std::exception_ptr error;
+        };
+        std::vector<Loaded> loaded(metadataPaths.size());
+        parallelFor(0, int(loaded.size()), [&](int i) {
+            Loaded &l = loaded[i];
+            try {
+                l.frame.reset(new BayerFrame);
+                l.metadata = loadFrame(metadataPaths.at(i), l.frame.get());
+                l.damage = rawFrameDamage(l.frame->pixels.data(), l.frame->width, l.frame->height,
+                                          l.frame->black.data());
+            } catch (...) {
+                l.error = std::current_exception();
+            }
+        });
+        for (int i = 0; i < int(loaded.size()); ++i) {
+            const QString &path = metadataPaths.at(i);
+            if (loaded[i].error) std::rethrow_exception(loaded[i].error);
+            frames.emplace_back(std::move(loaded[i].frame));
+            const QJsonObject m = loaded[i].metadata;
             const BayerFrame &f = *frames.back();
-            const QString why = rawFrameDamage(f.pixels.data(), f.width, f.height, f.black.data());
+            const QString why = loaded[i].damage;
             if (!why.isEmpty()) {
                 qWarning() << "rawpipeline damaged frame" << path << why;
                 damage = why;
