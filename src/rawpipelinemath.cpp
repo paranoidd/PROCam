@@ -175,6 +175,54 @@ struct Fft16 {
             im[(k1 + 12) * stride] = a1i - sign * b1r;
         }
     }
+    // The transform down every column of a 16x16 block: what
+    // run(re + x, im + x, 16, inverse) does for one column x, for all sixteen
+    // side by side, so that each step is a loop over a row of 16 values (which
+    // the compiler vectorizes) instead of sixteen strided passes.
+    void runColumns(float *re, float *im, bool inverse) const
+    {
+        const float sign = inverse ? 1.0f : -1.0f;
+        float yr[4][4][16], yi[4][4][16];
+        for (int n2 = 0; n2 < 4; ++n2) {
+            const float *x0r = re + n2 * 16, *x0i = im + n2 * 16;
+            const float *x1r = re + (n2 + 4) * 16, *x1i = im + (n2 + 4) * 16;
+            const float *x2r = re + (n2 + 8) * 16, *x2i = im + (n2 + 8) * 16;
+            const float *x3r = re + (n2 + 12) * 16, *x3i = im + (n2 + 12) * 16;
+            float wr[4], wi[4];
+            for (int k1 = 0; k1 < 4; ++k1) {
+                wr[k1] = cosTable16[n2 * k1];
+                wi[k1] = sign * sinTable16[n2 * k1];
+            }
+            for (int x = 0; x < 16; ++x) {
+                const float a0r = x0r[x] + x2r[x], a0i = x0i[x] + x2i[x], a1r = x0r[x] - x2r[x], a1i = x0i[x] - x2i[x];
+                const float b0r = x1r[x] + x3r[x], b0i = x1i[x] + x3i[x], b1r = x1r[x] - x3r[x], b1i = x1i[x] - x3i[x];
+                const float outr[4] = {a0r + b0r, a1r - sign * b1i, a0r - b0r, a1r + sign * b1i};
+                const float outi[4] = {a0i + b0i, a1i + sign * b1r, a0i - b0i, a1i - sign * b1r};
+                for (int k1 = 0; k1 < 4; ++k1) {
+                    yr[n2][k1][x] = outr[k1] * wr[k1] - outi[k1] * wi[k1];
+                    yi[n2][k1][x] = outr[k1] * wi[k1] + outi[k1] * wr[k1];
+                }
+            }
+        }
+        for (int k1 = 0; k1 < 4; ++k1) {
+            float *r0 = re + k1 * 16, *r1 = re + (k1 + 4) * 16, *r2 = re + (k1 + 8) * 16, *r3 = re + (k1 + 12) * 16;
+            float *i0 = im + k1 * 16, *i1 = im + (k1 + 4) * 16, *i2 = im + (k1 + 8) * 16, *i3 = im + (k1 + 12) * 16;
+            for (int x = 0; x < 16; ++x) {
+                const float a0r = yr[0][k1][x] + yr[2][k1][x], a0i = yi[0][k1][x] + yi[2][k1][x];
+                const float a1r = yr[0][k1][x] - yr[2][k1][x], a1i = yi[0][k1][x] - yi[2][k1][x];
+                const float b0r = yr[1][k1][x] + yr[3][k1][x], b0i = yi[1][k1][x] + yi[3][k1][x];
+                const float b1r = yr[1][k1][x] - yr[3][k1][x], b1i = yi[1][k1][x] - yi[3][k1][x];
+                r0[x] = a0r + b0r;
+                i0[x] = a0i + b0i;
+                r1[x] = a1r - sign * b1i;
+                i1[x] = a1i + sign * b1r;
+                r2[x] = a0r - b0r;
+                i2[x] = a0i - b0i;
+                r3[x] = a1r + sign * b1i;
+                i3[x] = a1i - sign * b1r;
+            }
+        }
+    }
 };
 
 const Fft16 &fft()
@@ -229,7 +277,7 @@ void forward2d(float *re, float *im)
 {
     const Fft16 &f = fft();
     for (int y = 0; y < 16; ++y) f.run(re + y * 16, im + y * 16, 1, false);
-    for (int x = 0; x < 16; ++x) f.run(re + x, im + x, 16, false);
+    f.runColumns(re, im, false);
 }
 
 } // namespace
