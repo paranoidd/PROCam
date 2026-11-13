@@ -1030,6 +1030,7 @@ PinchArea {
 
             function simpleCamera2ItemKeys() {
                 var keys = [ "timer", "ratio" ]
+                if (rawFilesAvailable) keys.push("shadows")
                 if (rawFilesAvailable) keys.push("rawSave")
                 keys.push("advanced")
                 keys.push("grid")
@@ -1061,6 +1062,7 @@ PinchArea {
 
             function rawItemKeys() {
                 var keys = [ "timer", "ratio" ]
+                if (rawFilesAvailable) keys.push("shadows")
                 if (rawFilesAvailable) keys.push("rawSave")
                 keys = keys.concat([ "advanced", "speed", "size", "quality", "timeout" ])
                 if (camera2FocusSupported) {
@@ -1086,7 +1088,10 @@ PinchArea {
             }
 
             function camera2JpegItemKeys() {
-                var keys = [ "timer", "ratio", "advanced", "speed", "size", "quality" ]
+                var keys = [ "timer", "ratio" ]
+                // The JPEG of a RAW camera is still rendered from a RAW burst.
+                if (rawFilesAvailable) keys.push("shadows")
+                keys = keys.concat([ "advanced", "speed", "size", "quality" ])
                 if (camera2FocusSupported) {
                     keys.push("focus")
                 }
@@ -1113,6 +1118,7 @@ PinchArea {
                 case "codec": return videoCodecSettingComponent
                 case "resolution": return videoResolutionSettingComponent
                 case "rawSave": return rawSaveSettingComponent
+                case "shadows": return shadowLiftSettingComponent
                 case "speed": return speedSettingComponent
                 case "size": return sizeSettingComponent
                 case "quality": return qualitySettingComponent
@@ -1443,6 +1449,20 @@ PinchArea {
                         }
                     }
                     model: [ "none", "dng", "raw16", "both" ]
+                }
+            }
+
+            Component {
+                id: shadowLiftSettingComponent
+                TextSettingMenu {
+                    width: grid.menuWidth
+                    title: "Shadows in HDR photos"
+                    header: upperHeader
+                    settings: Settings.global
+                    property: "shadowLift"
+                    caption: "Shadows"
+                    valueLabel: function(value) { return value === 2 ? "Bright" : value === 1 ? "Balanced" : "Natural" }
+                    model: [ 0, 1, 2 ]
                 }
             }
 
