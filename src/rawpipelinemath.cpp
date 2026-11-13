@@ -69,21 +69,26 @@ struct Image {
     float at(int x, int y) const { return data[std::size_t(clampIndex(y, height)) * width + clampIndex(x, width)]; }
 };
 
-Image boxDown(const Image &source, int factor)
+Image boxDown(const float *source, int width, int height, int factor)
 {
-    Image out(std::max(1, source.width / factor), std::max(1, source.height / factor));
+    Image out(std::max(1, width / factor), std::max(1, height / factor));
     const float scale = 1.0f / float(factor * factor);
     parallelFor(0, out.height, [&](int y) {
         for (int x = 0; x < out.width; ++x) {
             float sum = 0.0f;
             for (int dy = 0; dy < factor; ++dy) {
-                const float *row = &source.data[std::size_t(std::min(y * factor + dy, source.height - 1)) * source.width];
-                for (int dx = 0; dx < factor; ++dx) sum += row[std::min(x * factor + dx, source.width - 1)];
+                const float *row = &source[std::size_t(std::min(y * factor + dy, height - 1)) * width];
+                for (int dx = 0; dx < factor; ++dx) sum += row[std::min(x * factor + dx, width - 1)];
             }
             out.data[std::size_t(y) * out.width + x] = sum * scale;
         }
     });
     return out;
+}
+
+Image boxDown(const Image &source, int factor)
+{
+    return boxDown(source.data.data(), source.width, source.height, factor);
 }
 
 // Burt-Adelson REDUCE: 5-tap binomial blur, then decimate. `sample(x, y)`
@@ -314,23 +319,24 @@ double sharpness(const std::vector<float> &gray, int width, int height)
     // edges and texture, while flat areas (walls, sky) only carry noise,
     // which at high ISO swamped a whole-frame average (real 8-frame burst:
     // 0.4% spread over the frame, 4% on the detailed rack).
-    Image image;
-    image.width = width;
-    image.height = height;
-    image.data = gray;
-    const Image small = boxDown(image, 2);
+    const Image small = boxDown(gray.data(), width, height, 2);
     const int tile = 32;
     const int tilesX = std::max(1, (small.width - 1) / tile), tilesY = std::max(1, (small.height - 1) / tile);
     std::vector<double> energy(std::size_t(tilesX) * tilesY, 0.0);
-    for (int y = 1; y < small.height; ++y) {
-        const int ty = std::min(tilesY - 1, (y - 1) / tile);
-        for (int x = 1; x < small.width; ++x) {
-            const float c = small.data[std::size_t(y) * small.width + x];
-            energy[std::size_t(ty) * tilesX + std::min(tilesX - 1, (x - 1) / tile)]
-                    += std::abs(c - small.data[std::size_t(y) * small.width + x - 1])
-                    + std::abs(c - small.data[std::size_t(y - 1) * small.width + x]);
+    // One row of tiles per task: every tile still adds its pixels in raster
+    // order, so the sums are those of a single pass over the image. The last
+    // tile row takes the rows left over.
+    parallelFor(0, tilesY, [&](int ty) {
+        const int first = 1 + ty * tile, last = ty == tilesY - 1 ? small.height : 1 + (ty + 1) * tile;
+        for (int y = first; y < last; ++y) {
+            for (int x = 1; x < small.width; ++x) {
+                const float c = small.data[std::size_t(y) * small.width + x];
+                energy[std::size_t(ty) * tilesX + std::min(tilesX - 1, (x - 1) / tile)]
+                        += std::abs(c - small.data[std::size_t(y) * small.width + x - 1])
+                        + std::abs(c - small.data[std::size_t(y - 1) * small.width + x]);
+            }
         }
-    }
+    });
     const std::size_t top = std::max<std::size_t>(1, energy.size() / 10);
     std::nth_element(energy.begin(), energy.begin() + (energy.size() - top), energy.end());
     double sum = 0;
