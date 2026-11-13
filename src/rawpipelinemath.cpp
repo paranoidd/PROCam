@@ -69,21 +69,26 @@ struct Image {
     float at(int x, int y) const { return data[std::size_t(clampIndex(y, height)) * width + clampIndex(x, width)]; }
 };
 
-Image boxDown(const Image &source, int factor)
+Image boxDown(const float *source, int width, int height, int factor)
 {
-    Image out(std::max(1, source.width / factor), std::max(1, source.height / factor));
+    Image out(std::max(1, width / factor), std::max(1, height / factor));
     const float scale = 1.0f / float(factor * factor);
     parallelFor(0, out.height, [&](int y) {
         for (int x = 0; x < out.width; ++x) {
             float sum = 0.0f;
             for (int dy = 0; dy < factor; ++dy) {
-                const float *row = &source.data[std::size_t(std::min(y * factor + dy, source.height - 1)) * source.width];
-                for (int dx = 0; dx < factor; ++dx) sum += row[std::min(x * factor + dx, source.width - 1)];
+                const float *row = &source[std::size_t(std::min(y * factor + dy, height - 1)) * width];
+                for (int dx = 0; dx < factor; ++dx) sum += row[std::min(x * factor + dx, width - 1)];
             }
             out.data[std::size_t(y) * out.width + x] = sum * scale;
         }
     });
     return out;
+}
+
+Image boxDown(const Image &source, int factor)
+{
+    return boxDown(source.data.data(), source.width, source.height, factor);
 }
 
 // Burt-Adelson REDUCE: 5-tap binomial blur, then decimate. `sample(x, y)`
@@ -170,6 +175,54 @@ struct Fft16 {
             im[(k1 + 12) * stride] = a1i - sign * b1r;
         }
     }
+    // The transform down every column of a 16x16 block: what
+    // run(re + x, im + x, 16, inverse) does for one column x, for all sixteen
+    // side by side, so that each step is a loop over a row of 16 values (which
+    // the compiler vectorizes) instead of sixteen strided passes.
+    void runColumns(float *re, float *im, bool inverse) const
+    {
+        const float sign = inverse ? 1.0f : -1.0f;
+        float yr[4][4][16], yi[4][4][16];
+        for (int n2 = 0; n2 < 4; ++n2) {
+            const float *x0r = re + n2 * 16, *x0i = im + n2 * 16;
+            const float *x1r = re + (n2 + 4) * 16, *x1i = im + (n2 + 4) * 16;
+            const float *x2r = re + (n2 + 8) * 16, *x2i = im + (n2 + 8) * 16;
+            const float *x3r = re + (n2 + 12) * 16, *x3i = im + (n2 + 12) * 16;
+            float wr[4], wi[4];
+            for (int k1 = 0; k1 < 4; ++k1) {
+                wr[k1] = cosTable16[n2 * k1];
+                wi[k1] = sign * sinTable16[n2 * k1];
+            }
+            for (int x = 0; x < 16; ++x) {
+                const float a0r = x0r[x] + x2r[x], a0i = x0i[x] + x2i[x], a1r = x0r[x] - x2r[x], a1i = x0i[x] - x2i[x];
+                const float b0r = x1r[x] + x3r[x], b0i = x1i[x] + x3i[x], b1r = x1r[x] - x3r[x], b1i = x1i[x] - x3i[x];
+                const float outr[4] = {a0r + b0r, a1r - sign * b1i, a0r - b0r, a1r + sign * b1i};
+                const float outi[4] = {a0i + b0i, a1i + sign * b1r, a0i - b0i, a1i - sign * b1r};
+                for (int k1 = 0; k1 < 4; ++k1) {
+                    yr[n2][k1][x] = outr[k1] * wr[k1] - outi[k1] * wi[k1];
+                    yi[n2][k1][x] = outr[k1] * wi[k1] + outi[k1] * wr[k1];
+                }
+            }
+        }
+        for (int k1 = 0; k1 < 4; ++k1) {
+            float *r0 = re + k1 * 16, *r1 = re + (k1 + 4) * 16, *r2 = re + (k1 + 8) * 16, *r3 = re + (k1 + 12) * 16;
+            float *i0 = im + k1 * 16, *i1 = im + (k1 + 4) * 16, *i2 = im + (k1 + 8) * 16, *i3 = im + (k1 + 12) * 16;
+            for (int x = 0; x < 16; ++x) {
+                const float a0r = yr[0][k1][x] + yr[2][k1][x], a0i = yi[0][k1][x] + yi[2][k1][x];
+                const float a1r = yr[0][k1][x] - yr[2][k1][x], a1i = yi[0][k1][x] - yi[2][k1][x];
+                const float b0r = yr[1][k1][x] + yr[3][k1][x], b0i = yi[1][k1][x] + yi[3][k1][x];
+                const float b1r = yr[1][k1][x] - yr[3][k1][x], b1i = yi[1][k1][x] - yi[3][k1][x];
+                r0[x] = a0r + b0r;
+                i0[x] = a0i + b0i;
+                r1[x] = a1r - sign * b1i;
+                i1[x] = a1i + sign * b1r;
+                r2[x] = a0r - b0r;
+                i2[x] = a0i - b0i;
+                r3[x] = a1r + sign * b1i;
+                i3[x] = a1i - sign * b1r;
+            }
+        }
+    }
 };
 
 const Fft16 &fft()
@@ -224,7 +277,7 @@ void forward2d(float *re, float *im)
 {
     const Fft16 &f = fft();
     for (int y = 0; y < 16; ++y) f.run(re + y * 16, im + y * 16, 1, false);
-    for (int x = 0; x < 16; ++x) f.run(re + x, im + x, 16, false);
+    f.runColumns(re, im, false);
 }
 
 } // namespace
@@ -314,23 +367,24 @@ double sharpness(const std::vector<float> &gray, int width, int height)
     // edges and texture, while flat areas (walls, sky) only carry noise,
     // which at high ISO swamped a whole-frame average (real 8-frame burst:
     // 0.4% spread over the frame, 4% on the detailed rack).
-    Image image;
-    image.width = width;
-    image.height = height;
-    image.data = gray;
-    const Image small = boxDown(image, 2);
+    const Image small = boxDown(gray.data(), width, height, 2);
     const int tile = 32;
     const int tilesX = std::max(1, (small.width - 1) / tile), tilesY = std::max(1, (small.height - 1) / tile);
     std::vector<double> energy(std::size_t(tilesX) * tilesY, 0.0);
-    for (int y = 1; y < small.height; ++y) {
-        const int ty = std::min(tilesY - 1, (y - 1) / tile);
-        for (int x = 1; x < small.width; ++x) {
-            const float c = small.data[std::size_t(y) * small.width + x];
-            energy[std::size_t(ty) * tilesX + std::min(tilesX - 1, (x - 1) / tile)]
-                    += std::abs(c - small.data[std::size_t(y) * small.width + x - 1])
-                    + std::abs(c - small.data[std::size_t(y - 1) * small.width + x]);
+    // One row of tiles per task: every tile still adds its pixels in raster
+    // order, so the sums are those of a single pass over the image. The last
+    // tile row takes the rows left over.
+    parallelFor(0, tilesY, [&](int ty) {
+        const int first = 1 + ty * tile, last = ty == tilesY - 1 ? small.height : 1 + (ty + 1) * tile;
+        for (int y = first; y < last; ++y) {
+            for (int x = 1; x < small.width; ++x) {
+                const float c = small.data[std::size_t(y) * small.width + x];
+                energy[std::size_t(ty) * tilesX + std::min(tilesX - 1, (x - 1) / tile)]
+                        += std::abs(c - small.data[std::size_t(y) * small.width + x - 1])
+                        + std::abs(c - small.data[std::size_t(y - 1) * small.width + x]);
+            }
         }
-    }
+    });
     const std::size_t top = std::max<std::size_t>(1, energy.size() / 10);
     std::nth_element(energy.begin(), energy.begin() + (energy.size() - top), energy.end());
     double sum = 0;
@@ -699,10 +753,18 @@ void loadMosaicTiles(const BayerFrame &frame, const float *black, const float *s
             float *even = tiles[2 * half] + y * MergeTileSize, *odd = tiles[2 * half + 1] + y * MergeTileSize;
             const float blackEven = black[2 * half], blackOdd = black[2 * half + 1];
             const float scaleEven = scale[2 * half], scaleOdd = scale[2 * half + 1];
-            for (int x = 0; x < MergeTileSize; ++x) {
-                const int px = insideX ? originX + x : reflect(originX + x, width);
-                even[x] = (float(row[2 * px]) - blackEven) * scaleEven;
-                odd[x] = (float(row[2 * px + 1]) - blackOdd) * scaleOdd;
+            if (insideX) {
+                const uint16_t *pair = row + 2 * originX;
+                for (int x = 0; x < MergeTileSize; ++x) {
+                    even[x] = (float(pair[2 * x]) - blackEven) * scaleEven;
+                    odd[x] = (float(pair[2 * x + 1]) - blackOdd) * scaleOdd;
+                }
+            } else {
+                for (int x = 0; x < MergeTileSize; ++x) {
+                    const int px = reflect(originX + x, width);
+                    even[x] = (float(row[2 * px]) - blackEven) * scaleEven;
+                    odd[x] = (float(row[2 * px + 1]) - blackOdd) * scaleOdd;
+                }
             }
         }
     }
@@ -812,15 +874,20 @@ Planes mergeFrames(int width, int height, float clip, int frameCount, Load load,
                     forwardPair(tile[2], tile[3], ar[2], ai[2], ar[3], ai[3]);
                     for (int p = 0; p < 4; ++p) {
                         const float threshold = temporal * sigma2[p];
-                        double weightSum = 0;
+                        // The weights are summed in a loop of their own (in
+                        // the same order): a running sum in the loop above
+                        // it would keep the compiler from vectorizing it.
+                        float weight[256];
                         for (int i = 0; i < 256; ++i) {
                             const float dr = rr[p][i] - ar[p][i], di = ri[p][i] - ai[p][i];
                             const float d2 = dr * dr + di * di;
                             const float a = d2 / (d2 + threshold + 1e-30f);
                             mr[p][i] += ar[p][i] + a * dr;
                             mi[p][i] += ai[p][i] + a * di;
-                            weightSum += a;
+                            weight[i] = a;
                         }
+                        double weightSum = 0;
+                        for (int i = 0; i < 256; ++i) weightSum += weight[i];
                         rejection += weightSum / 256;
                     }
                 }
@@ -828,38 +895,48 @@ Planes mergeFrames(int width, int height, float clip, int frameCount, Load load,
                 for (int p = 0; p < 4; ++p) {
                     const float merged2 = sigma2[p] / frameCount;
                     for (int i = 0; i < 256; ++i) {
-                        float re = mr[p][i] * inverseCount, im = mi[p][i] * inverseCount;
-                        if (spatial > 0 && i) {
+                        mr[p][i] *= inverseCount;
+                        mi[p][i] *= inverseCount;
+                    }
+                    if (!(spatial > 0)) continue;
+                    // Every coefficient but DC (i = 0); with or without the
+                    // pilot estimate is decided once, not per coefficient.
+                    if (pilot > 0) {
+                        for (int i = 1; i < 256; ++i) {
+                            const float re = mr[p][i], im = mi[p][i];
                             const float m2 = re * re + im * im;
                             const float shaping = floor + (1.0f - floor) * tables.radius[i];
                             const float noise = spatial * shaping * merged2;
-                            float power = m2;
-                            if (pilot > 0) {
-                                const float first = m2 / (m2 + pilot * shaping * merged2 + 1e-30f);
-                                power = m2 * first * first;
-                            }
+                            const float first = m2 / (m2 + pilot * shaping * merged2 + 1e-30f);
+                            const float power = m2 * first * first;
                             const float shrink = power / (power + noise + 1e-30f);
-                            re *= shrink;
-                            im *= shrink;
+                            mr[p][i] = re * shrink;
+                            mi[p][i] = im * shrink;
                         }
-                        mr[p][i] = re;
-                        mi[p][i] = im;
+                    } else {
+                        for (int i = 1; i < 256; ++i) {
+                            const float re = mr[p][i], im = mi[p][i];
+                            const float m2 = re * re + im * im;
+                            const float shaping = floor + (1.0f - floor) * tables.radius[i];
+                            const float noise = spatial * shaping * merged2;
+                            const float shrink = m2 / (m2 + noise + 1e-30f);
+                            mr[p][i] = re * shrink;
+                            mi[p][i] = im * shrink;
+                        }
                     }
                 }
                 inversePair(mr[0], mi[0], mr[1], mi[1], tile[0], tile[1]);
                 inversePair(mr[2], mi[2], mr[3], mi[3], tile[2], tile[3]);
+                const int x0 = std::max(0, -ox), x1 = std::min(MergeTileSize, width - ox);
                 for (int p = 0; p < 4; ++p) {
                     std::vector<float> &plane = out.phase[p];
                     for (int y = 0; y < MergeTileSize; ++y) {
                         const int py = oy + y;
                         if (py < 0 || py >= height) continue;
                         const float wy = tables.window[y] / 256.0f;
-                        float *row = &plane[std::size_t(py) * width];
-                        for (int x = 0; x < MergeTileSize; ++x) {
-                            const int px = ox + x;
-                            if (px < 0 || px >= width) continue;
-                            row[px] += tile[p][y * 16 + x] * wy * tables.window[x];
-                        }
+                        float *row = &plane[std::size_t(py) * width + (ox + x0)];
+                        const float *values = tile[p] + y * 16 + x0, *window = tables.window + x0;
+                        for (int x = 0; x < x1 - x0; ++x) row[x] += values[x] * wy * window[x];
                     }
                 }
             }
@@ -1089,17 +1166,26 @@ std::vector<float> superResolveGreen(const std::vector<const BayerFrame *> &fram
     // Robustness per alternate frame on the plane grid: local green of the
     // aligned frame against the guide, tolerant of noise and of texture
     // (residual misalignment), then a 3x3 minimum to stay conservative.
+    // Element-wise over a whole plane or image: one row per task.
+    auto forRows = [](int rows, int rowLength, const auto &f) {
+        parallelFor(0, rows, [&](int y) {
+            const std::size_t begin = std::size_t(y) * rowLength, end = begin + rowLength;
+            for (std::size_t i = begin; i < end; ++i) f(i);
+        });
+    };
     std::vector<float> guideGreen(std::size_t(planeWidth) * planeHeight);
-    for (std::size_t i = 0; i < guideGreen.size(); ++i)
+    forRows(planeHeight, planeWidth, [&](std::size_t i) {
         guideGreen[i] = 0.5f * (guide.phase[greenPhases[0]][i] + guide.phase[greenPhases[1]][i]);
+    });
     const std::vector<float> guideMean = boxMean3(guideGreen, planeWidth, planeHeight);
     std::vector<float> guideVariance(guideGreen.size());
     {
         std::vector<float> squared(guideGreen.size());
-        for (std::size_t i = 0; i < squared.size(); ++i) squared[i] = guideGreen[i] * guideGreen[i];
+        forRows(planeHeight, planeWidth, [&](std::size_t i) { squared[i] = guideGreen[i] * guideGreen[i]; });
         squared = boxMean3(squared, planeWidth, planeHeight);
-        for (std::size_t i = 0; i < squared.size(); ++i)
+        forRows(planeHeight, planeWidth, [&](std::size_t i) {
             guideVariance[i] = std::max(0.0f, squared[i] - guideMean[i] * guideMean[i]);
+        });
     }
     std::vector<std::vector<float>> robustness(frameCount);
     for (int z = 1; z < frameCount; ++z) {
@@ -1255,8 +1341,9 @@ std::vector<float> superResolveGreen(const std::vector<const BayerFrame *> &fram
             }
         }
     });
-    for (std::size_t i = 0; i < numerator.size(); ++i)
+    forRows(outHeight, outWidth, [&](std::size_t i) {
         numerator[i] = denominator[i] > 1e-4f ? numerator[i] / denominator[i] : std::numeric_limits<float>::quiet_NaN();
+    });
     if (coverage) {
         // In frames: each one lands 0.5 green samples per sensor pixel, and
         // a cell spans (2 / scale)^2 sensor pixels. Smoothed so the swap
@@ -1556,11 +1643,23 @@ std::vector<float> gaussianBlur(const std::vector<float> &source, int width, int
     parallelFor(0, height, [&](int y) {
         const float *row = &source[std::size_t(y) * width];
         float *dst = &temp[std::size_t(y) * width];
-        for (int x = 0; x < width; ++x) {
+        auto reflected = [&](int x) {
             float v = 0;
             for (int i = -radius; i <= radius; ++i) v += kernel[i + radius] * row[reflect(x + i, width)];
             dst[x] = v;
+        };
+        // Away from the borders no tap is reflected: add the taps one at a
+        // time over the whole row, in the same order as the sum above (the
+        // result is the same), in loops the compiler can vectorize.
+        const int first = std::min(radius, width), last = std::max(first, width - radius);
+        for (int x = 0; x < first; ++x) reflected(x);
+        for (int x = first; x < last; ++x) dst[x] = 0;
+        for (int i = -radius; i <= radius; ++i) {
+            const float k = kernel[i + radius];
+            const float *tap = row + i;
+            for (int x = first; x < last; ++x) dst[x] += k * tap[x];
         }
+        for (int x = last; x < width; ++x) reflected(x);
     });
     parallelFor(0, height, [&](int y) {
         float *dst = &out[std::size_t(y) * width];
@@ -2328,13 +2427,33 @@ RgbImage finish(const Planes &merged, const FinishOptions &options, FinishStats 
         };
         float coring[bands];
         {
-            std::vector<std::vector<float>> samples(bands);
-            for (int y = 0; y < height; y += 3)
-                for (int x = (y / 3) % 3; x < width; x += 3) {
-                    const std::size_t i = std::size_t(y) * width + x;
-                    const float d = (detail[i] - detailLow[i]) - (demosaicked[i] - demosaickedLow[i]);
-                    samples[bandOf(demosaickedLow[i])].push_back(std::abs(d));
+            // Every third pixel of every third row, gathered in blocks of
+            // rows on all cores and joined in order: the same lists as a
+            // single pass.
+            const int sampleRows = (height + 2) / 3, blockRows = 32;
+            const int blocks = (sampleRows + blockRows - 1) / blockRows;
+            std::vector<std::vector<std::vector<float>>> blockSamples(blocks);
+            parallelFor(0, blocks, [&](int block) {
+                std::vector<std::vector<float>> &local = blockSamples[block];
+                local.resize(bands);
+                const int last = std::min(sampleRows, (block + 1) * blockRows);
+                for (int row = block * blockRows; row < last; ++row) {
+                    const int y = row * 3;
+                    for (int x = (y / 3) % 3; x < width; x += 3) {
+                        const std::size_t i = std::size_t(y) * width + x;
+                        const float d = (detail[i] - detailLow[i]) - (demosaicked[i] - demosaickedLow[i]);
+                        local[bandOf(demosaickedLow[i])].push_back(std::abs(d));
+                    }
                 }
+            });
+            std::vector<std::vector<float>> samples(bands);
+            for (int b = 0; b < bands; ++b) {
+                std::size_t total = 0;
+                for (const std::vector<std::vector<float>> &local : blockSamples) total += local[b].size();
+                samples[b].reserve(total);
+                for (const std::vector<std::vector<float>> &local : blockSamples)
+                    samples[b].insert(samples[b].end(), local[b].begin(), local[b].end());
+            }
             float previous = 0;
             for (int b = 0; b < bands; ++b) {
                 std::vector<float> &v = samples[b];
@@ -2599,6 +2718,9 @@ RgbImage finish(const Planes &merged, const FinishOptions &options, FinishStats 
     // The black and white points move the smooth layer only and the fine
     // detail is added back unchanged: stretching the bright tones would
     // otherwise amplify their noise too (indoor walls: half again grainier).
+    // The display colour is worked out once: this pass keeps it in place of
+    // the linear colour (and its luma in place of the fused one, both done
+    // with) for the pass below.
     std::vector<float> curvedLuma, smoothLuma;
     if (toneEnds.blackPoint > 0 || toneEnds.whiteScale > 1) {
         curvedLuma.resize(pixels);
@@ -2606,7 +2728,10 @@ RgbImage finish(const Planes &merged, const FinishOptions &options, FinishStats 
             for (int x = 0; x < width; ++x) {
                 const std::size_t i = std::size_t(y) * width + x;
                 float g[3];
-                curvedLuma[i] = contrastCurve(display(i, g));
+                const float l = display(i, g);
+                curvedLuma[i] = contrastCurve(l);
+                for (int k = 0; k < 3; ++k) rgb[i * 3 + k] = g[k];
+                fused[i] = l;
             }
         });
         smoothLuma = gaussianBlur(curvedLuma, width, height, 2.0);
@@ -2628,9 +2753,15 @@ RgbImage finish(const Planes &merged, const FinishOptions &options, FinishStats 
         for (int x = 0; x < width; ++x) {
             const std::size_t i = std::size_t(y) * width + x;
             float *p = &rgb[i * 3];
-            float g[3];
-            const float l = display(i, g);
-            const float curved = contrastCurve(l);
+            float g[3], l, curved;
+            if (smoothLuma.empty()) {
+                l = display(i, g);
+                curved = contrastCurve(l);
+            } else {
+                for (int k = 0; k < 3; ++k) g[k] = p[k];
+                l = fused[i];
+                curved = curvedLuma[i];
+            }
             const float lc = smoothLuma.empty() ? toneEnds(curved)
                                                 : toneEnds(smoothLuma[i]) + (curved - smoothLuma[i]);
             // Darkened shadows keep their colour in proportion.
