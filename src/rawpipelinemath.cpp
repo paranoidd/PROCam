@@ -1095,17 +1095,26 @@ std::vector<float> superResolveGreen(const std::vector<const BayerFrame *> &fram
     // Robustness per alternate frame on the plane grid: local green of the
     // aligned frame against the guide, tolerant of noise and of texture
     // (residual misalignment), then a 3x3 minimum to stay conservative.
+    // Element-wise over a whole plane or image: one row per task.
+    auto forRows = [](int rows, int rowLength, const auto &f) {
+        parallelFor(0, rows, [&](int y) {
+            const std::size_t begin = std::size_t(y) * rowLength, end = begin + rowLength;
+            for (std::size_t i = begin; i < end; ++i) f(i);
+        });
+    };
     std::vector<float> guideGreen(std::size_t(planeWidth) * planeHeight);
-    for (std::size_t i = 0; i < guideGreen.size(); ++i)
+    forRows(planeHeight, planeWidth, [&](std::size_t i) {
         guideGreen[i] = 0.5f * (guide.phase[greenPhases[0]][i] + guide.phase[greenPhases[1]][i]);
+    });
     const std::vector<float> guideMean = boxMean3(guideGreen, planeWidth, planeHeight);
     std::vector<float> guideVariance(guideGreen.size());
     {
         std::vector<float> squared(guideGreen.size());
-        for (std::size_t i = 0; i < squared.size(); ++i) squared[i] = guideGreen[i] * guideGreen[i];
+        forRows(planeHeight, planeWidth, [&](std::size_t i) { squared[i] = guideGreen[i] * guideGreen[i]; });
         squared = boxMean3(squared, planeWidth, planeHeight);
-        for (std::size_t i = 0; i < squared.size(); ++i)
+        forRows(planeHeight, planeWidth, [&](std::size_t i) {
             guideVariance[i] = std::max(0.0f, squared[i] - guideMean[i] * guideMean[i]);
+        });
     }
     std::vector<std::vector<float>> robustness(frameCount);
     for (int z = 1; z < frameCount; ++z) {
@@ -1261,8 +1270,9 @@ std::vector<float> superResolveGreen(const std::vector<const BayerFrame *> &fram
             }
         }
     });
-    for (std::size_t i = 0; i < numerator.size(); ++i)
+    forRows(outHeight, outWidth, [&](std::size_t i) {
         numerator[i] = denominator[i] > 1e-4f ? numerator[i] / denominator[i] : std::numeric_limits<float>::quiet_NaN();
+    });
     if (coverage) {
         // In frames: each one lands 0.5 green samples per sensor pixel, and
         // a cell spans (2 / scale)^2 sensor pixels. Smoothed so the swap
